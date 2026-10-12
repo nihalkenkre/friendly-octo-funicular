@@ -1,13 +1,11 @@
-use std::{ffi::CStr, sync::WaitTimeoutResult};
+use std::ffi::CStr;
 
 use ash::{
     ext::{self},
     khr,
-    vk::{self, Image},
+    vk::{self},
 };
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
-
-use crate::scene_graph;
 
 pub struct Instance {
     pub instance: ash::Instance,
@@ -462,10 +460,11 @@ pub struct SwapchainData {
 
     pub images: Vec<vk::Image>,
     pub image_views: Vec<vk::ImageView>,
-    pub image_count: u32,
 
     pub acq_sig_sems: Vec<vk::Semaphore>,
     pub prsnt_wait_sems: Vec<vk::Semaphore>,
+
+    pub frames_in_flight: u32,
 
     image_index: u32,
 }
@@ -477,6 +476,7 @@ impl SwapchainData {
         surface: &SurfaceData,
         queue_family_indices: &[u32],
         debug_utils: &DebugUtils,
+        extra_frames_in_flight: u32,
     ) -> Self {
         let create_info = vk::SwapchainCreateInfoKHR::default()
             .surface(surface.surface)
@@ -509,6 +509,9 @@ impl SwapchainData {
         let mut acq_sig_sems = vec![];
         let mut prsnt_wait_sems = vec![];
 
+        let frames_in_flight =
+            surface.capabilities.surface_capabilities.min_image_count + extra_frames_in_flight;
+
         unsafe {
             swapchain = swapchain_loader
                 .create_swapchain(&create_info, None)
@@ -521,7 +524,7 @@ impl SwapchainData {
                 image_views.push(device.create_image_view(&iv_ci, None).unwrap());
             }
 
-            for _ in 0..images.len() {
+            for _ in 0..frames_in_flight {
                 acq_sig_sems.push(
                     device
                         .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
@@ -564,15 +567,17 @@ impl SwapchainData {
             }
         }
 
+        let image_index = 0;
+
         Self {
             swapchain_loader,
             swapchain,
             images,
             image_views,
-            image_count: surface.capabilities.surface_capabilities.min_image_count,
             acq_sig_sems,
             prsnt_wait_sems,
-            image_index: 0,
+            image_index,
+            frames_in_flight,
         }
     }
 
@@ -596,19 +601,10 @@ impl SwapchainData {
     }
 
     pub fn get_acq_sig_sem(&self) -> vk::Semaphore {
-        // let semaphore = *self.acq_sig_sems.get(image_index as usize).unwrap();
-
         *self.acq_sig_sems.get(self.image_index as usize).unwrap()
     }
 
     pub fn get_prsnt_wait_sem(&self) -> vk::Semaphore {
-        // let semaphore = *self
-        //     .prsnt_wait_sems
-        //     .get(self.current_index as usize)
-        //     .unwrap();
-
-        // semaphore
-
         *self.prsnt_wait_sems.get(self.image_index as usize).unwrap()
     }
 
@@ -624,12 +620,8 @@ impl SwapchainData {
         image_view
     }
 
-    pub fn set_image_index(&mut self, image_index: u32) {
-        self.image_index = image_index;
-    }
-
     pub fn next_index(&mut self) {
-        self.image_index = (self.image_index + 1) % self.image_count;
+        self.image_index = (self.image_index + 1) % self.frames_in_flight;
     }
 }
 
@@ -1110,7 +1102,7 @@ impl TransferTask {
         );
     }
 
-    pub fn destroy(self, device: &ash::Device) {
+    pub fn destroy(&self, device: &ash::Device) {
         self.task.destroy(device);
     }
 }
@@ -1159,7 +1151,7 @@ impl GraphicsTask {
         for color_target in color_targets {
             img_mem_barrs.push(
                 vk::ImageMemoryBarrier2::default()
-                    .src_stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE)
+                    .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
                     .dst_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
                     .src_access_mask(vk::AccessFlags2::empty())
                     .dst_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
@@ -1198,7 +1190,7 @@ impl GraphicsTask {
             img_mem_barrs.push(
                 vk::ImageMemoryBarrier2::default()
                     .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
-                    .dst_stage_mask(vk::PipelineStageFlags2::BOTTOM_OF_PIPE)
+                    .dst_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
                     .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
                     .dst_access_mask(vk::AccessFlags2::empty())
                     .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)

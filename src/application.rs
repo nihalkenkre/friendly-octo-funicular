@@ -66,18 +66,7 @@ impl<'instance_lifetime> winit::application::ApplicationHandler<events::UserEven
                 event_loop.exit();
             }
             event::WindowEvent::Destroyed => {}
-            event::WindowEvent::RedrawRequested => {
-                // self.renderer
-                //     .as_ref()
-                //     .unwrap()
-                //     .render_scene_graph(&self.scene_graph.as_ref().unwrap());
-                // self.renderer
-                //     .as_ref()
-                //     .unwrap()
-                //     .render_node_editor(&self.scene_graph.as_ref().unwrap());
-
-                // self.window.as_ref().unwrap().request_redraw();
-            }
+            event::WindowEvent::RedrawRequested => {}
             _ => {}
         }
     }

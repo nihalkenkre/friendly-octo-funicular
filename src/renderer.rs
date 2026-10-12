@@ -12,6 +12,9 @@ use crate::scene_graph::{self, SceneGraph};
 mod objects;
 
 pub struct Renderer<'instance_lifetime> {
+    transfer_tasks: Arc<Mutex<objects::TransferTask>>,
+    transfer_thread: Option<JoinHandle<()>>,
+
     graphics_tasks: Arc<Mutex<objects::GraphicsTask>>,
     graphics_thread: Option<JoinHandle<()>>,
     is_shutting_down: Arc<AtomicBool>,
@@ -49,7 +52,7 @@ impl<'instance_lifetime> Renderer<'instance_lifetime> {
             debug_utils.set_object_name(surface_data.surface, "surface".to_string());
             debug_utils.set_object_name(
                 physical_device_data.physical_device,
-                "physical Device".to_string(),
+                "physical device".to_string(),
             );
             debug_utils.set_object_name(dd.device.handle(), "device".to_string());
             debug_utils.set_object_name(dd.graphics_queue, "graphics queue".to_string());
@@ -63,15 +66,27 @@ impl<'instance_lifetime> Renderer<'instance_lifetime> {
             &surface_data,
             &physical_device_data.queue_family_indices,
             debug_utils,
+            0,
         );
+
+        let frames_in_flight = sd.frames_in_flight;
 
         let graphics_tasks = Arc::new(Mutex::new(objects::GraphicsTask::create(
             &dd.device,
             dd.graphics_queue,
             physical_device_data.graphics_queue_family_index,
-            sd.image_count as usize,
+            frames_in_flight as usize,
             &debug_utils,
             "graphics tasks".to_string(),
+        )));
+
+        let transfer_tasks = Arc::new(Mutex::new(objects::TransferTask::create(
+            &dd.device,
+            dd.transfer_queue,
+            physical_device_data.transfer_queue_family_index,
+            frames_in_flight as usize,
+            &debug_utils,
+            "transfer tasks".to_string(),
         )));
 
         let swapchain_data = Arc::new(Mutex::new(sd));
@@ -90,6 +105,7 @@ impl<'instance_lifetime> Renderer<'instance_lifetime> {
         let scene_graph = SceneGraph::create();
         let is_shutting_down = Arc::new(AtomicBool::new(false));
         let graphics_thread = None;
+        let transfer_thread = None;
 
         Self {
             instance,
@@ -97,11 +113,13 @@ impl<'instance_lifetime> Renderer<'instance_lifetime> {
             physical_device_data,
             device_data,
             swapchain_data,
-            graphics_tasks,
             allocator,
             scene_graph,
             is_shutting_down,
             graphics_thread,
+            graphics_tasks,
+            transfer_tasks,
+            transfer_thread,
         }
     }
 
@@ -114,7 +132,21 @@ impl<'instance_lifetime> Renderer<'instance_lifetime> {
             device_data.device.device_wait_idle().unwrap();
         }
 
-        self.graphics_thread.unwrap().join().unwrap();
+        match self.graphics_thread {
+            Some(th) => th.join().unwrap(),
+            None => {}
+        }
+
+        match self.transfer_thread {
+            Some(th) => th.join().unwrap(),
+            None=> {}
+        }
+
+        self.transfer_tasks
+            .lock()
+            .unwrap()
+            .destroy(&device_data.device);
+
         self.graphics_tasks
             .lock()
             .unwrap()
@@ -238,14 +270,14 @@ impl<'instance_lifetime> Renderer<'instance_lifetime> {
 
                     graphics_tasks.submit_task(
                         &device_data.device,
-                        vk::PipelineStageFlags2::TOP_OF_PIPE,
-                        vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
+                        vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+                        vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
                         &[vk::SemaphoreSubmitInfo::default()
                             .semaphore(swapchain_data.get_acq_sig_sem())
-                            .stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE)],
+                            .stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)],
                         &[vk::SemaphoreSubmitInfo::default()
                             .semaphore(swapchain_data.get_prsnt_wait_sem())
-                            .stage_mask(vk::PipelineStageFlags2::BOTTOM_OF_PIPE)],
+                            .stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)],
                     );
 
                     graphics_tasks.present(&swapchain_data, &[image_index]);
@@ -253,108 +285,9 @@ impl<'instance_lifetime> Renderer<'instance_lifetime> {
                     swapchain_data.next_index();
                     graphics_tasks.task.next_frame();
 
-                    // thread::sleep(Duration::from_millis(100));
+                    thread::sleep(Duration::from_millis(16));
                 }
             }));
         }
     }
-
-    pub fn render_scene_graph(&self, scene_graph: &scene_graph::SceneGraph) {}
-
-    pub fn render_node_editor(&self, scene_graph: &scene_graph::SceneGraph) {}
-
-    // pub fn render_blank(&mut self) {
-    //     let (sem, sem_val) = self.graphics_tasks.get_semaphore_and_value();
-
-    //     unsafe {
-    //         self.device_data
-    //             .device
-    //             .wait_semaphores(
-    //                 &vk::SemaphoreWaitInfo::default()
-    //                     .semaphores(&[sem])
-    //                     .values(&[sem_val]),
-    //                 u64::MAX,
-    //             )
-    //             .unwrap();
-    //     }
-
-    //     let acq_info = vk::AcquireNextImageInfoKHR::default()
-    //         .swapchain(self.swapchain_data.swapchain)
-    //         .semaphore(self.swapchain_data.get_acq_sig_sem())
-    //         .timeout(u64::MAX)
-    //         .device_mask(1);
-
-    //     let image_index: u32;
-
-    //     unsafe {
-    //         match self
-    //             .swapchain_data
-    //             .swapchain_loader
-    //             .acquire_next_image2(&acq_info)
-    //         {
-    //             Ok(id) => {
-    //                 if !id.1 {
-    //                     image_index = id.0;
-    //                 } else {
-    //                     eprintln!("Swapchain is suboptimal");
-    //                     return;
-    //                 }
-    //             }
-
-    //             Err(err) => {
-    //                 eprintln!("{err}");
-    //                 return;
-    //             }
-    //         }
-    //     }
-
-    //     self.graphics_tasks.start_task(&self.device_data.device);
-    //     self.graphics_tasks.change_image_layout(
-    //         &self.device_data.device,
-    //         *self
-    //             .swapchain_data
-    //             .images
-    //             .get(image_index as usize)
-    //             .unwrap(),
-    //         vk::ImageLayout::UNDEFINED,
-    //         vk::ImageLayout::PRESENT_SRC_KHR,
-    //         vk::PipelineStageFlags2::TOP_OF_PIPE,
-    //         vk::PipelineStageFlags2::TRANSFER,
-    //         vk::AccessFlags2::empty(),
-    //         vk::AccessFlags2::MEMORY_WRITE,
-    //     );
-    //     self.graphics_tasks.end_task(&self.device_data.device);
-
-    //     self.graphics_tasks.submit_task(
-    //         &self.device_data.device,
-    //         vk::PipelineStageFlags2::TOP_OF_PIPE,
-    //         vk::PipelineStageFlags2::TRANSFER,
-    //         vec![
-    //             vk::SemaphoreSubmitInfo::default()
-    //                 .semaphore(self.swapchain_data.get_acq_sig_sem())
-    //                 .stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE),
-    //         ],
-    //         vec![
-    //             vk::SemaphoreSubmitInfo::default()
-    //                 .semaphore(self.swapchain_data.get_prsnt_wait_sem())
-    //                 .stage_mask(vk::PipelineStageFlags2::TRANSFER),
-    //         ],
-    //     );
-
-    //     unsafe {
-    //         match self.swapchain_data.swapchain_loader.queue_present(
-    //             self.device_data.graphics_queue,
-    //             &vk::PresentInfoKHR::default()
-    //                 .image_indices(&[image_index])
-    //                 .swapchains(&[self.swapchain_data.swapchain])
-    //                 .wait_semaphores(&[self.swapchain_data.get_prsnt_wait_sem()]),
-    //         ) {
-    //             Ok(_) => {}
-    //             Err(err) => eprintln!("{err}"),
-    //         }
-    //     }
-
-    //     self.graphics_tasks.task.next_frame();
-    //     self.swapchain_data.next_frame();
-    // }
 }
