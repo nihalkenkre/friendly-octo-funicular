@@ -42,6 +42,154 @@ impl Instance {
         }
     }
 
+    pub fn create_device_and_queues(
+        &self,
+        physical_device_data: &PhysicalDeviceData,
+    ) -> (ash::Device, vk::Queue, vk::Queue, vk::Queue) {
+        let req_exts = [
+            vk::KHR_SWAPCHAIN_NAME.as_ptr() as *const i8,
+            vk::KHR_DEFERRED_HOST_OPERATIONS_NAME.as_ptr() as *const i8,
+            vk::EXT_ROBUSTNESS2_NAME.as_ptr() as *const i8,
+            vk::EXT_EXTENDED_DYNAMIC_STATE3_NAME.as_ptr() as *const i8,
+        ];
+
+        let mut dyn_rend_feats =
+            vk::PhysicalDeviceDynamicRenderingFeatures::default().dynamic_rendering(true);
+        let mut sync2_feats =
+            vk::PhysicalDeviceSynchronization2Features::default().synchronization2(true);
+        let mut feats11 =
+            vk::PhysicalDeviceVulkan11Features::default().shader_draw_parameters(true);
+        let mut feats12 = vk::PhysicalDeviceVulkan12Features::default()
+            .uniform_and_storage_buffer8_bit_access(true)
+            .shader_int8(true)
+            .timeline_semaphore(true)
+            .buffer_device_address(true)
+            .descriptor_binding_partially_bound(true)
+            .descriptor_binding_variable_descriptor_count(true)
+            .runtime_descriptor_array(true)
+            .storage_push_constant8(true);
+        let mut feats2 = vk::PhysicalDeviceFeatures2::default()
+            .push_next(&mut dyn_rend_feats)
+            .push_next(&mut sync2_feats)
+            .push_next(&mut feats11)
+            .push_next(&mut feats12);
+
+        // Go through the retrieved queue family indices and create the device queue create infos.
+        // If there are more than one queue family share the same index, then more than one queue is requested in the queue create info
+        let mut d_q_cis: Vec<vk::DeviceQueueCreateInfo> = Vec::new();
+
+        match d_q_cis.iter_mut().find(|d_q_ci| {
+            d_q_ci.queue_family_index == physical_device_data.graphics_queue_family_index
+        }) {
+            Some(x) => {
+                x.queue_count += 1;
+            }
+            None => {
+                d_q_cis.push(vk::DeviceQueueCreateInfo {
+                    queue_family_index: physical_device_data.graphics_queue_family_index,
+                    queue_count: 1,
+                    ..Default::default()
+                });
+            }
+        }
+
+        match d_q_cis.iter_mut().find(|d_q_ci| {
+            d_q_ci.queue_family_index == physical_device_data.compute_queue_family_index
+        }) {
+            Some(x) => {
+                x.queue_count += 1;
+            }
+            None => {
+                d_q_cis.push(vk::DeviceQueueCreateInfo {
+                    queue_family_index: physical_device_data.compute_queue_family_index,
+                    queue_count: 1,
+                    ..Default::default()
+                });
+            }
+        }
+
+        match d_q_cis.iter_mut().find(|d_q_ci| {
+            d_q_ci.queue_family_index == physical_device_data.transfer_queue_family_index
+        }) {
+            Some(x) => {
+                x.queue_count += 1;
+            }
+            None => {
+                d_q_cis.push(vk::DeviceQueueCreateInfo {
+                    queue_family_index: physical_device_data.transfer_queue_family_index,
+                    queue_count: 1,
+                    ..Default::default()
+                });
+            }
+        }
+
+        for d_q_ci in &mut d_q_cis {
+            let priorities: Vec<f32> = vec![1f32; d_q_ci.queue_count as usize];
+
+            d_q_ci.p_queue_priorities = priorities.as_ptr();
+        }
+
+        let create_info = vk::DeviceCreateInfo::default()
+            .enabled_extension_names(&req_exts)
+            .queue_create_infos(&d_q_cis)
+            .push_next(&mut feats2);
+
+        unsafe {
+            let device = self
+                .instance
+                .create_device(physical_device_data.physical_device, &create_info, None)
+                .unwrap();
+
+            // Loop through the device queue create infos and retrieve the queues.
+            let graphics_queue = match d_q_cis.iter().enumerate().find(|&d_q_ci| {
+                d_q_ci.1.queue_family_index == physical_device_data.graphics_queue_family_index
+            }) {
+                Some(x) => device.get_device_queue2(&vk::DeviceQueueInfo2 {
+                    queue_family_index: physical_device_data.graphics_queue_family_index,
+                    queue_index: x.1.queue_count - 1, // hardcoded since we need just one queue
+                    ..Default::default()
+                }),
+                None => device.get_device_queue2(&vk::DeviceQueueInfo2 {
+                    queue_family_index: 0,
+                    queue_index: 0,
+                    ..Default::default()
+                }),
+            };
+
+            let compute_queue = match d_q_cis.iter().enumerate().find(|&d_q_ci| {
+                d_q_ci.1.queue_family_index == physical_device_data.compute_queue_family_index
+            }) {
+                Some(x) => device.get_device_queue2(&vk::DeviceQueueInfo2 {
+                    queue_family_index: physical_device_data.compute_queue_family_index,
+                    queue_index: x.1.queue_count - 1, // hardcoded since we need just one queue
+                    ..Default::default()
+                }),
+                None => device.get_device_queue2(&vk::DeviceQueueInfo2 {
+                    queue_family_index: 0,
+                    queue_index: 0,
+                    ..Default::default()
+                }),
+            };
+
+            let transfer_queue = match d_q_cis.iter().enumerate().find(|&d_q_ci| {
+                d_q_ci.1.queue_family_index == physical_device_data.transfer_queue_family_index
+            }) {
+                Some(x) => device.get_device_queue2(&vk::DeviceQueueInfo2 {
+                    queue_family_index: physical_device_data.transfer_queue_family_index,
+                    queue_index: x.1.queue_count - 1, // hardcoded since we need just one queue
+                    ..Default::default()
+                }),
+                None => device.get_device_queue2(&vk::DeviceQueueInfo2 {
+                    queue_family_index: 0,
+                    queue_index: 0,
+                    ..Default::default()
+                }),
+            };
+
+            (device, graphics_queue, compute_queue, transfer_queue)
+        }
+    }
+
     pub fn destroy(self) {
         unsafe {
             self.instance.destroy_instance(None);
@@ -625,218 +773,6 @@ impl SwapchainData {
     }
 }
 
-pub struct QueueTasks {
-    pub command_pool: vk::CommandPool,
-    pub command_buffers: Vec<vk::CommandBuffer>,
-    pub semaphores: Vec<vk::Semaphore>,
-    pub semaphore_values: Vec<u64>,
-    pub queue: vk::Queue,
-    pub queue_family_index: u32,
-    pub count: usize,
-    pub current_index: usize,
-}
-
-impl QueueTasks {
-    pub fn new(
-        device: &ash::Device,
-        queue: vk::Queue,
-        queue_family_index: u32,
-        count: usize,
-        debug_utils: &DebugUtils,
-        name: String,
-    ) -> Self {
-        let semaphore_values = vec![1u64; count];
-
-        unsafe {
-            let mut sem_tl_ci = vk::SemaphoreTypeCreateInfo::default()
-                .initial_value(0)
-                .semaphore_type(vk::SemaphoreType::TIMELINE);
-
-            let mut semaphores = vec![];
-            for i in 0..count {
-                let semaphore = device
-                    .create_semaphore(
-                        &vk::SemaphoreCreateInfo::default().push_next(&mut sem_tl_ci),
-                        None,
-                    )
-                    .unwrap();
-
-                device
-                    .signal_semaphore(
-                        &vk::SemaphoreSignalInfo::default()
-                            .semaphore(semaphore)
-                            .value(1),
-                    )
-                    .unwrap();
-
-                semaphores.push(semaphore);
-
-                if cfg!(debug_assertions) {
-                    let name_str = name.clone() + " semaphore " + &i.to_string();
-                    debug_utils.set_object_name(semaphore, name_str);
-                }
-            }
-
-            let command_pool = device
-                .create_command_pool(
-                    &vk::CommandPoolCreateInfo::default()
-                        .queue_family_index(queue_family_index)
-                        .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER),
-                    None,
-                )
-                .unwrap();
-
-            if cfg!(debug_assertions) {
-                let mut n = name.clone();
-                n.push_str(" command pool");
-                debug_utils.set_object_name(command_pool, n);
-            }
-
-            let command_buffers = device
-                .allocate_command_buffers(
-                    &vk::CommandBufferAllocateInfo::default()
-                        .command_buffer_count(count as u32)
-                        .command_pool(command_pool)
-                        .level(vk::CommandBufferLevel::PRIMARY),
-                )
-                .unwrap();
-            if cfg!(debug_assertions) {
-                for (i, command_buffer) in command_buffers.iter().enumerate() {
-                    let mut n = name.clone();
-                    n.push_str(&(" command buffer ".to_owned() + i.to_string().as_str()));
-                    debug_utils.set_object_name(*command_buffer, n);
-                }
-            }
-
-            Self {
-                command_pool,
-                command_buffers,
-                semaphores,
-                semaphore_values,
-                queue,
-                queue_family_index,
-                count,
-                current_index: 0,
-            }
-        }
-    }
-
-    pub fn destroy(self, device: &ash::Device) {
-        unsafe {
-            device.destroy_command_pool(self.command_pool, None);
-
-            for sem in self.semaphores {
-                device.destroy_semaphore(sem, None);
-            }
-        }
-    }
-
-    pub fn start_task(device: &ash::Device, command_buffer: vk::CommandBuffer) {
-        unsafe {
-            device
-                .begin_command_buffer(
-                    command_buffer,
-                    &vk::CommandBufferBeginInfo::default()
-                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
-                )
-                .unwrap();
-        }
-    }
-
-    pub fn change_image_layout(
-        &self,
-        device: &ash::Device,
-        image: vk::Image,
-        old_layout: vk::ImageLayout,
-        new_layout: vk::ImageLayout,
-        src_stage_mask: vk::PipelineStageFlags2,
-        dst_stage_mask: vk::PipelineStageFlags2,
-        src_access_mask: vk::AccessFlags2,
-        dst_access_mask: vk::AccessFlags2,
-    ) {
-        unsafe {
-            device.cmd_pipeline_barrier2(
-                *self.command_buffers.get(self.current_index).unwrap(),
-                &vk::DependencyInfo::default().image_memory_barriers(&[
-                    vk::ImageMemoryBarrier2::default()
-                        .src_stage_mask(src_stage_mask)
-                        .dst_stage_mask(dst_stage_mask)
-                        .src_access_mask(src_access_mask)
-                        .dst_access_mask(dst_access_mask)
-                        .old_layout(old_layout)
-                        .new_layout(new_layout)
-                        .image(image)
-                        .subresource_range(
-                            vk::ImageSubresourceRange::default()
-                                .layer_count(1)
-                                .level_count(1)
-                                .aspect_mask(vk::ImageAspectFlags::COLOR),
-                        ),
-                ]),
-            );
-        }
-    }
-
-    pub fn end_task(&self, device: &ash::Device) {
-        unsafe {
-            device
-                .end_command_buffer(*self.command_buffers.get(self.current_index).unwrap())
-                .unwrap();
-        }
-    }
-
-    pub fn submit_task(
-        &self,
-        device: &ash::Device,
-        wait_stage_mask: vk::PipelineStageFlags2,
-        signal_stage_mask: vk::PipelineStageFlags2,
-        mut wait_sem_infos: Vec<vk::SemaphoreSubmitInfo>,
-        mut sig_sem_infos: Vec<vk::SemaphoreSubmitInfo>,
-    ) {
-        wait_sem_infos.push(
-            vk::SemaphoreSubmitInfo::default()
-                .semaphore(*self.semaphores.get(self.current_index).unwrap())
-                .value(*self.semaphore_values.get(self.current_index).unwrap())
-                .stage_mask(wait_stage_mask),
-        );
-
-        sig_sem_infos.push(
-            vk::SemaphoreSubmitInfo::default()
-                .semaphore(*self.semaphores.get(self.current_index).unwrap())
-                .value(*self.semaphore_values.get(self.current_index).unwrap() + 1)
-                .stage_mask(signal_stage_mask),
-        );
-
-        unsafe {
-            device
-                .queue_submit2(
-                    self.queue,
-                    &[vk::SubmitInfo2::default()
-                        .command_buffer_infos(&[vk::CommandBufferSubmitInfo::default()
-                            .command_buffer(
-                                *self.command_buffers.get(self.current_index).unwrap(),
-                            )])
-                        .wait_semaphore_infos(&wait_sem_infos)
-                        .signal_semaphore_infos(&sig_sem_infos)],
-                    vk::Fence::null(),
-                )
-                .unwrap();
-        }
-    }
-
-    pub fn get_semaphore_and_value(&self) -> (vk::Semaphore, u64) {
-        (
-            *self.semaphores.get(self.current_index).unwrap(),
-            *self.semaphore_values.get(self.current_index).unwrap(),
-        )
-    }
-
-    pub fn next_frame(&mut self) {
-        self.semaphore_values[self.current_index] += 1;
-        self.current_index = (self.current_index + 1) % self.count;
-    }
-}
-
 pub struct Task {
     pub command_pool: vk::CommandPool,
     pub command_buffers: Vec<vk::CommandBuffer>,
@@ -963,13 +899,7 @@ impl Task {
     ) {
         let (semaphore, value) = self.get_semaphore_and_value();
 
-        let mut wsi = wait_sem_infos.to_vec();
-        wsi.push(
-            vk::SemaphoreSubmitInfo::default()
-                .semaphore(semaphore)
-                .value(value)
-                .stage_mask(wait_stage_mask),
-        );
+        let wsi = wait_sem_infos.to_vec();
 
         let mut ssi = sig_sem_infos.to_vec();
         ssi.push(

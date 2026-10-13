@@ -1,5 +1,5 @@
 use std::{
-    sync::{Arc, Mutex, atomic::AtomicBool},
+    sync::{Arc, Mutex, RwLock, atomic::AtomicBool},
     thread::{self, JoinHandle},
     time::Duration,
 };
@@ -12,17 +12,20 @@ use crate::scene_graph::{self, SceneGraph};
 mod objects;
 
 pub struct Renderer<'instance_lifetime> {
-    transfer_tasks: Arc<Mutex<objects::TransferTask>>,
+    transfer_tasks: Arc<RwLock<objects::TransferTask>>,
     transfer_thread: Option<JoinHandle<()>>,
 
-    graphics_tasks: Arc<Mutex<objects::GraphicsTask>>,
+    graphics_tasks: Arc<RwLock<objects::GraphicsTask>>,
     graphics_thread: Option<JoinHandle<()>>,
     is_shutting_down: Arc<AtomicBool>,
 
     scene_graph: scene_graph::SceneGraph,
     allocator: vk_mem::Allocator,
     swapchain_data: Arc<Mutex<objects::SwapchainData>>,
-    device_data: Arc<Mutex<objects::DeviceData>>,
+    transfer_queue: Arc<Mutex<vk::Queue>>,
+    compute_queue: Arc<Mutex<vk::Queue>>,
+    graphics_queue: Arc<Mutex<vk::Queue>>,
+    device: Arc<ash::Device>,
     physical_device_data: objects::PhysicalDeviceData<'instance_lifetime>,
     surface_data: objects::SurfaceData<'instance_lifetime>,
     instance: objects::Instance,
@@ -44,8 +47,14 @@ impl<'instance_lifetime> Renderer<'instance_lifetime> {
         );
         surface_data.populate_data(&physical_device_data.physical_device);
 
-        let dd = objects::DeviceData::new(&instance.instance, &physical_device_data);
-        let debug_utils = &objects::DebugUtils::new(&instance.instance, &dd.device);
+        let (d, gq, cq, tq) = instance.create_device_and_queues(&physical_device_data);
+
+        let device = Arc::new(d);
+        let graphics_queue = Arc::new(Mutex::new(gq));
+        let compute_queue = Arc::new(Mutex::new(cq));
+        let transfer_queue = Arc::new(Mutex::new(tq));
+
+        let debug_utils = &objects::DebugUtils::new(&instance.instance, &device);
 
         if cfg!(debug_assertions) {
             debug_utils.set_object_name(instance.instance.handle(), "instance".to_string());
@@ -54,15 +63,15 @@ impl<'instance_lifetime> Renderer<'instance_lifetime> {
                 physical_device_data.physical_device,
                 "physical device".to_string(),
             );
-            debug_utils.set_object_name(dd.device.handle(), "device".to_string());
-            debug_utils.set_object_name(dd.graphics_queue, "graphics queue".to_string());
-            debug_utils.set_object_name(dd.compute_queue, "compute queue".to_string());
-            debug_utils.set_object_name(dd.transfer_queue, "transfer queue".to_string());
+            debug_utils.set_object_name(device.handle(), "device".to_string());
+            debug_utils.set_object_name(gq, "graphics queue".to_string());
+            debug_utils.set_object_name(cq, "compute queue".to_string());
+            debug_utils.set_object_name(tq, "transfer queue".to_string());
         }
 
         let sd = objects::SwapchainData::new(
             &instance.instance,
-            &dd.device,
+            &device,
             &surface_data,
             &physical_device_data.queue_family_indices,
             debug_utils,
@@ -71,18 +80,18 @@ impl<'instance_lifetime> Renderer<'instance_lifetime> {
 
         let frames_in_flight = sd.frames_in_flight;
 
-        let graphics_tasks = Arc::new(Mutex::new(objects::GraphicsTask::create(
-            &dd.device,
-            dd.graphics_queue,
+        let graphics_tasks = Arc::new(RwLock::new(objects::GraphicsTask::create(
+            &device,
+            gq,
             physical_device_data.graphics_queue_family_index,
             frames_in_flight as usize,
             &debug_utils,
             "graphics tasks".to_string(),
         )));
 
-        let transfer_tasks = Arc::new(Mutex::new(objects::TransferTask::create(
-            &dd.device,
-            dd.transfer_queue,
+        let transfer_tasks = Arc::new(RwLock::new(objects::TransferTask::create(
+            &device,
+            tq,
             physical_device_data.transfer_queue_family_index,
             frames_in_flight as usize,
             &debug_utils,
@@ -95,13 +104,12 @@ impl<'instance_lifetime> Renderer<'instance_lifetime> {
         unsafe {
             allocator = vk_mem::Allocator::new(vk_mem::AllocatorCreateInfo::new(
                 &instance.instance,
-                &dd.device,
+                &device,
                 physical_device_data.physical_device,
             ))
             .unwrap();
         }
 
-        let device_data = Arc::new(Mutex::new(dd));
         let scene_graph = SceneGraph::create();
         let is_shutting_down = Arc::new(AtomicBool::new(false));
         let graphics_thread = None;
@@ -111,9 +119,12 @@ impl<'instance_lifetime> Renderer<'instance_lifetime> {
             instance,
             surface_data,
             physical_device_data,
-            device_data,
             swapchain_data,
             allocator,
+            transfer_queue,
+            compute_queue,
+            graphics_queue,
+            device,
             scene_graph,
             is_shutting_down,
             graphics_thread,
@@ -127,9 +138,8 @@ impl<'instance_lifetime> Renderer<'instance_lifetime> {
         self.is_shutting_down
             .store(true, std::sync::atomic::Ordering::Relaxed);
 
-        let device_data = self.device_data.lock().unwrap();
         unsafe {
-            device_data.device.device_wait_idle().unwrap();
+            self.device.device_wait_idle().unwrap();
         }
 
         match self.graphics_thread {
@@ -139,36 +149,26 @@ impl<'instance_lifetime> Renderer<'instance_lifetime> {
 
         match self.transfer_thread {
             Some(th) => th.join().unwrap(),
-            None=> {}
+            None => {}
         }
 
-        self.transfer_tasks
-            .lock()
-            .unwrap()
-            .destroy(&device_data.device);
+        self.transfer_tasks.read().unwrap().destroy(&self.device);
+        self.graphics_tasks.read().unwrap().destroy(&self.device);
+        self.swapchain_data.lock().unwrap().destroy(&self.device);
 
-        self.graphics_tasks
-            .lock()
-            .unwrap()
-            .destroy(&device_data.device);
-
-        self.swapchain_data
-            .lock()
-            .unwrap()
-            .destroy(&device_data.device);
-
-        device_data.destroy();
+        unsafe {
+            self.device.destroy_device(None);
+        }
         self.surface_data.destroy();
         self.instance.destroy();
     }
 
     pub fn start_jobs(&mut self) {
         {}
-        {}
         {
             let gt = Arc::clone(&self.graphics_tasks);
             let is_shutting_down = Arc::clone(&self.is_shutting_down);
-            let dd = Arc::clone(&self.device_data);
+            let device = Arc::clone(&self.device);
             let sd = Arc::clone(&self.swapchain_data);
             let extent = self
                 .surface_data
@@ -179,8 +179,10 @@ impl<'instance_lifetime> Renderer<'instance_lifetime> {
             self.graphics_thread = Some(thread::spawn(move || {
                 while !is_shutting_down.load(std::sync::atomic::Ordering::Relaxed) {
                     let mut swapchain_data = sd.lock().unwrap();
-                    let mut graphics_tasks = gt.lock().unwrap();
-                    let device_data = dd.lock().unwrap();
+                    let mut graphics_tasks;
+                    {
+                        graphics_tasks = gt.write().unwrap();
+                    }
 
                     let clear_color = vk::ClearColorValue {
                         float32: [
@@ -196,8 +198,7 @@ impl<'instance_lifetime> Renderer<'instance_lifetime> {
                     let (semaphore, value) = graphics_tasks.task.get_semaphore_and_value();
 
                     unsafe {
-                        device_data
-                            .device
+                        device
                             .wait_semaphores(
                                 &vk::SemaphoreWaitInfo::default()
                                     .semaphores(&[semaphore])
@@ -246,13 +247,10 @@ impl<'instance_lifetime> Renderer<'instance_lifetime> {
 
                     let color_targets: [vk::Image; 1] = [swapchain_data.get_image(image_index)];
 
-                    graphics_tasks.start_task(
-                        &device_data.device,
-                        graphics_tasks.task.get_command_buffer(),
-                    );
+                    graphics_tasks.start_task(&device, graphics_tasks.task.get_command_buffer());
 
                     graphics_tasks.begin_render_pass(
-                        &device_data.device,
+                        &device,
                         &color_attachments,
                         &color_targets,
                         vk::RenderingAttachmentInfo::default(),
@@ -265,11 +263,11 @@ impl<'instance_lifetime> Renderer<'instance_lifetime> {
                         &[vk::Rect2D::default().extent(extent)],
                     );
 
-                    graphics_tasks.end_render_pass(&device_data.device, &color_targets);
-                    graphics_tasks.end_task(&device_data.device);
+                    graphics_tasks.end_render_pass(&device, &color_targets);
+                    graphics_tasks.end_task(&device);
 
                     graphics_tasks.submit_task(
-                        &device_data.device,
+                        &device,
                         vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
                         vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
                         &[vk::SemaphoreSubmitInfo::default()
@@ -285,7 +283,61 @@ impl<'instance_lifetime> Renderer<'instance_lifetime> {
                     swapchain_data.next_index();
                     graphics_tasks.task.next_frame();
 
-                    thread::sleep(Duration::from_millis(16));
+                    println!("gfx");
+                    thread::sleep(Duration::from_millis(100));
+                }
+            }));
+        }
+        {
+            let is_shutting_down = Arc::clone(&self.is_shutting_down);
+            let tt = Arc::clone(&self.transfer_tasks);
+            let device = Arc::clone(&self.device);
+            let gt = Arc::clone(&self.graphics_tasks);
+
+            self.transfer_thread = Some(thread::spawn(move || {
+                while !is_shutting_down.load(std::sync::atomic::Ordering::Relaxed) {
+                    let mut transfer_tasks;
+                    {
+                        transfer_tasks = tt.write().unwrap();
+                    }
+                    let graphics_tasks;
+                    {
+                        graphics_tasks = gt.read().unwrap();
+                    }
+
+                    let (semaphore, value) = transfer_tasks.task.get_semaphore_and_value();
+
+                    unsafe {
+                        device
+                            .wait_semaphores(
+                                &vk::SemaphoreWaitInfo::default()
+                                    .semaphores(&[semaphore])
+                                    .values(&[value]),
+                                u64::MAX,
+                            )
+                            .unwrap();
+                    }
+
+                    transfer_tasks.start_task(&device, transfer_tasks.task.get_command_buffer());
+
+                    transfer_tasks.end_task(&device);
+
+                    let (gt_sem, gt_val) = graphics_tasks.task.get_semaphore_and_value();
+
+                    transfer_tasks.submit_task(
+                        &device,
+                        vk::PipelineStageFlags2::empty(),
+                        vk::PipelineStageFlags2::TRANSFER,
+                        &[vk::SemaphoreSubmitInfo::default()
+                            .semaphore(gt_sem)
+                            .value(gt_val)
+                            .stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE)],
+                        &[],
+                    );
+
+                    transfer_tasks.task.next_frame();
+                    println!("xfer");
+                    thread::sleep(Duration::from_millis(1000));
                 }
             }));
         }
