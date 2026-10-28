@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 winit = "*"
 env_logger = "*"
-ash = { version = "*", features = ["linked"] }
+ash = { version = "*", features = ["loaded"] }
 ash-window = "*"
 vk-mem = "*"
 rand = "*"

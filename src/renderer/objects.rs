@@ -12,9 +12,7 @@ pub struct Instance {
 }
 
 impl Instance {
-    pub fn new(extensions: &[*const i8]) -> Self {
-        let ash_entry = ash::Entry::linked();
-
+    pub fn new(ash_entry: &ash::Entry, extensions: &[*const i8]) -> Self {
         let mut all_exts = vec![];
 
         if cfg!(debug_assertions) {
@@ -353,10 +351,10 @@ pub struct SurfaceData<'instance_lifetime> {
 }
 
 impl<'instance_lifetime> SurfaceData<'instance_lifetime> {
-    pub fn new(instance: &ash::Instance, window: &winit::window::Window) -> Self {
+    pub fn new(ash_entry: &ash::Entry, instance: &ash::Instance, window: &winit::window::Window) -> Self {
         unsafe {
             let surface = ash_window::create_surface(
-                &ash::Entry::linked(),
+                ash_entry,
                 instance,
                 window.display_handle().unwrap().as_raw(),
                 window.window_handle().unwrap().as_raw(),
@@ -369,7 +367,7 @@ impl<'instance_lifetime> SurfaceData<'instance_lifetime> {
                 capabilities: vk::SurfaceCapabilities2KHR::default(),
                 surface_format: vk::SurfaceFormat2KHR::default(),
                 present_mode: vk::PresentModeKHR::default(),
-                surface_loader: khr::surface::Instance::new(&ash::Entry::linked(), instance),
+                surface_loader: khr::surface::Instance::new(ash_entry, instance),
             }
         }
     }

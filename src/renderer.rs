@@ -29,6 +29,7 @@ pub struct Renderer<'instance_lifetime> {
     physical_device_data: objects::PhysicalDeviceData<'instance_lifetime>,
     surface_data: objects::SurfaceData<'instance_lifetime>,
     instance: objects::Instance,
+    ash_entry: ash::Entry,
 }
 
 impl<'instance_lifetime> Renderer<'instance_lifetime> {
@@ -37,8 +38,9 @@ impl<'instance_lifetime> Renderer<'instance_lifetime> {
             ash_window::enumerate_required_extensions(window.display_handle().unwrap().as_raw())
                 .unwrap();
 
-        let instance = objects::Instance::new(extensions);
-        let mut surface_data = objects::SurfaceData::new(&instance.instance, &window);
+        let ash_entry = unsafe { ash::Entry::load().unwrap() };
+        let instance = objects::Instance::new(&ash_entry, extensions);
+        let mut surface_data = objects::SurfaceData::new(&ash_entry, &instance.instance, &window);
 
         let physical_device_data = objects::PhysicalDeviceData::new(
             &instance.instance,
@@ -116,6 +118,7 @@ impl<'instance_lifetime> Renderer<'instance_lifetime> {
         let transfer_thread = None;
 
         Self {
+            ash_entry,
             instance,
             surface_data,
             physical_device_data,
